@@ -1,0 +1,5 @@
+serial_bridge:
+  ros__parameters:
+    device: "/dev/arduino_rp2040_connect"
+    baud_rate: 115200
+    flow_control: software
