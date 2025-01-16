@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 class SerialNode : public rclcpp::Node
 {
@@ -29,10 +31,16 @@ public:
         // Initialize serial port
         configure_serial_port();
 
-        // Create a timer to read from the serial port
-        timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(1),
-            std::bind(&SerialNode::read_serial_data, this));
+        // Start a dedicated thread to read serial data
+        reading_thread_ = std::thread(&SerialNode::read_serial_data, this);
+    }
+
+    ~SerialNode()
+    {
+        running_ = false;
+        if (reading_thread_.joinable()) {
+            reading_thread_.join();
+        }
     }
 
 private:
@@ -55,36 +63,40 @@ private:
 
     void read_serial_data()
     {
-        if (!serial_driver_->is_open()) {
-            RCLCPP_ERROR(this->get_logger(), "Serial port is not open");
-            return;
-        }
+        while (running_ && rclcpp::ok()) {
+            if (!serial_driver_->is_open()) {
+                RCLCPP_ERROR(this->get_logger(), "Serial port is not open");
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
 
-        try {
-            std::vector<uint8_t> buffer(1024);
-            auto bytes_read = serial_driver_->receive(buffer);
+            try {
+                std::vector<uint8_t> buffer(1024);
+                auto bytes_read = serial_driver_->receive(buffer);
 
-            if (bytes_read > 0) {
-                for (size_t i = 0; i < bytes_read; ++i) {
-                    char byte = static_cast<char>(buffer[i]);
+                if (bytes_read > 0) {
+                    for (size_t i = 0; i < bytes_read; ++i) {
+                        char byte = static_cast<char>(buffer[i]);
 
-                    // Check for newline or carriage return to indicate end of a message
-                    if (byte == '\n' || byte == '\r') {
-                        process_complete_message();
-                    } else {
-                        // Add byte to the buffer if it's a valid character
-                        if (buffered_data_.size() < MAX_BUFFER_SIZE) {
-                            buffered_data_ += byte;
+                        // Check for newline or carriage return to indicate end of a message
+                        if (byte == '\n' || byte == '\r') {
+                            process_complete_message();
                         } else {
-                            // Clear buffer if it overflows
-                            RCLCPP_WARN(this->get_logger(), "Buffer overflow, clearing data");
-                            buffered_data_.clear();
+                            // Add byte to the buffer if it's a valid character
+                            if (buffered_data_.size() < MAX_BUFFER_SIZE) {
+                                buffered_data_ += byte;
+                            } else {
+                                // Clear buffer if it overflows
+                                RCLCPP_WARN(this->get_logger(), "Buffer overflow, clearing data");
+                                buffered_data_.clear();
+                            }
                         }
                     }
                 }
+            } catch (const std::exception &e) {
+                RCLCPP_ERROR(this->get_logger(), "Error reading from serial port: %s", e.what());
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(this->get_logger(), "Error reading from serial port: %s", e.what());
         }
     }
 
@@ -126,7 +138,6 @@ private:
 
     // ROS 2 components
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr publisher_;
-    rclcpp::TimerBase::SharedPtr timer_;
 
     // Serial driver
     std::shared_ptr<drivers::common::IoContext> io_context_;
@@ -135,6 +146,10 @@ private:
     // Data buffering
     std::string buffered_data_;
     static constexpr size_t MAX_BUFFER_SIZE = 1024;
+
+    // Reading thread
+    std::thread reading_thread_;
+    std::atomic<bool> running_ = true;
 };
 
 int main(int argc, char *argv[])
